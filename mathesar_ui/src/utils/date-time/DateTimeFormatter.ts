@@ -52,11 +52,9 @@ function parseWithSpec(
     ...canonicalFormats,
   ];
 
-  // Try strict parsing first
   const strictResult = dayjs(input, allFormats, true);
   if (strictResult.isValid()) return strictResult;
 
-  // Try canonical fallback (non-strict)
   const canonicalResult = dayjs(input, canonicalFormats);
   if (canonicalResult.isValid()) return canonicalResult;
 
@@ -82,20 +80,25 @@ export default class DateTimeFormatter implements InputFormatter<string> {
       return { value: trimmed, intermediateDisplay: input };
     }
 
+    // Extract raw numeric year directly from input (dayjs can’t do BC)
+    const yearMatch = trimmed.match(/^(-?\d{1,6})-/);
+    const rawYear = yearMatch ? parseInt(yearMatch[1], 10) : null;
+
     const dayjsValue =
       parseKeywords(trimmed) ?? parseWithSpec(trimmed, this.specification);
 
     if (dayjsValue) {
       const jsDate = dayjsValue.toDate();
-      const year = dayjsValue.year();
-
-      // ------------------------------------------------------
-      // ✔ Auto-BC logic: If year < 500 and user did NOT type BC/AD
-      // ------------------------------------------------------
       const userSpecifiedEra =
         upper.includes(' BC') || upper.includes(' AD');
 
-      if (!userSpecifiedEra && year > 0 && year < 500) {
+      // Auto-BC logic (REAL FIX)
+      if (
+        rawYear !== null &&
+        rawYear > 0 &&
+        rawYear < 500 &&
+        !userSpecifiedEra
+      ) {
         const canonical = this.specification.getCanonicalString(jsDate);
         return {
           value: `${canonical} BC`,
@@ -103,14 +106,14 @@ export default class DateTimeFormatter implements InputFormatter<string> {
         };
       }
 
-      // Normal AD (or explicit user-specified era)
+      // Normal AD case
       return {
         value: this.specification.getCanonicalString(jsDate),
         intermediateDisplay: input,
       };
     }
 
-    // Parsing failed — keep original because PostgreSQL may accept it
+    // Parsing failed — keep raw input
     return { value: trimmed, intermediateDisplay: input };
   }
 
@@ -119,6 +122,11 @@ export default class DateTimeFormatter implements InputFormatter<string> {
    */
   format(canonicalDateStringOrUserInput: string): string {
     const trimmed = canonicalDateStringOrUserInput.trim();
+
+    // Preserve all BC dates exactly — dayjs cannot parse BC at all.
+    if (trimmed.endsWith("BC")) {
+      return trimmed;
+    }
 
     // Preserve canonical PostgreSQL dates exactly.
     if (PG_CANONICAL_DATE_REGEX.test(trimmed)) {
