@@ -24,13 +24,7 @@ type Dayjs = ReturnType<typeof dayjs>;
 const PG_CANONICAL_DATE_REGEX = /^-?\d{1,6}-\d{2}-\d{2}(?:\s+BC)?$/;
 
 /**
- * This function converts the following keywords to their respective date/time
- * values:
- *
- * - now
- * - today
- * - tomorrow
- * - yesterday
+ * Convert keywords like now/today/tomorrow/yesterday
  */
 function parseKeywords(input: string): Dayjs | undefined {
   switch (input.trim().toLowerCase()) {
@@ -81,14 +75,9 @@ export default class DateTimeFormatter implements InputFormatter<string> {
    */
   parse(input: string): ParseResult<string> {
     const trimmed = input.trim();
+    const upper = trimmed.toUpperCase();
 
-    // ⚠️ CRITICAL: Do NOT parse canonical PostgreSQL dates with dayjs.
-    // It cannot handle:
-    // - 0001-12-31
-    // - 0200-12-31
-    // - 20010-12-31
-    // - 2001-12-31 BC
-    // So we preserve them exactly.
+    // Preserve canonical PostgreSQL dates exactly.
     if (PG_CANONICAL_DATE_REGEX.test(trimmed)) {
       return { value: trimmed, intermediateDisplay: input };
     }
@@ -96,21 +85,33 @@ export default class DateTimeFormatter implements InputFormatter<string> {
     const dayjsValue =
       parseKeywords(trimmed) ?? parseWithSpec(trimmed, this.specification);
 
-    const value = (() => {
-      if (dayjsValue) {
-        // Convert to canonical spec-defined string
-        return this.specification.getCanonicalString(dayjsValue.toDate());
+    if (dayjsValue) {
+      const jsDate = dayjsValue.toDate();
+      const year = dayjsValue.year();
+
+      // ------------------------------------------------------
+      // ✔ Auto-BC logic: If year < 500 and user did NOT type BC/AD
+      // ------------------------------------------------------
+      const userSpecifiedEra =
+        upper.includes(' BC') || upper.includes(' AD');
+
+      if (!userSpecifiedEra && year > 0 && year < 500) {
+        const canonical = this.specification.getCanonicalString(jsDate);
+        return {
+          value: `${canonical} BC`,
+          intermediateDisplay: input,
+        };
       }
 
-      // If parsing failed, keep the original input as PostgreSQL may accept it.
-      return trimmed;
-    })();
+      // Normal AD (or explicit user-specified era)
+      return {
+        value: this.specification.getCanonicalString(jsDate),
+        intermediateDisplay: input,
+      };
+    }
 
-    // Do not modify what the user sees while typing
-    const intermediateDisplay = input;
-
-    // Use ?? because we only want to turn undefined into null
-    return { value: value ?? null, intermediateDisplay };
+    // Parsing failed — keep original because PostgreSQL may accept it
+    return { value: trimmed, intermediateDisplay: input };
   }
 
   /**
