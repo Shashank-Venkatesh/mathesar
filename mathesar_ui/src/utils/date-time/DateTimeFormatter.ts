@@ -109,7 +109,8 @@ export default class DateTimeFormatter implements InputFormatter<string> {
     // Do not modify what the user sees while typing
     const intermediateDisplay = input;
 
-    return { value: value ? value : null, intermediateDisplay };
+    // Use ?? because we only want to turn undefined into null
+    return { value: value ?? null, intermediateDisplay };
   }
 
   /**
