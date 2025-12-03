@@ -9,6 +9,21 @@ import type DateTimeSpecification from './DateTimeSpecification';
 type Dayjs = ReturnType<typeof dayjs>;
 
 /**
+ * PostgreSQL canonical date formats allow:
+ * - 1–6 digit years (0001 → 999999)
+ * - Optional " BC"
+ * - Optional leading negative for BC-style numeric years
+ *
+ * Examples:
+ *   2001-12-31
+ *   0200-12-31
+ *   0001-12-31
+ *   20010-12-31
+ *   2001-12-31 BC
+ */
+const PG_CANONICAL_DATE_REGEX = /^-?\d{1,6}-\d{2}-\d{2}(?:\s+BC)?$/;
+
+/**
  * This function converts the following keywords to their respective date/time
  * values:
  *
@@ -16,15 +31,6 @@ type Dayjs = ReturnType<typeof dayjs>;
  * - today
  * - tomorrow
  * - yesterday
- *
- * PostgreSQL understands these keywords, so why parse them on the front end?
- * Because the front end might be in a different timezone than the database. If
- * the user enters "now" in the front end, we need to represent that instant
- * from the perspective of the user's timezone, not the server's timezone. And if
- * we simply pass "now" to the server, it will interpret it in the server's
- * timezone.
- *
- * See: https://github.com/mathesar-foundation/mathesar/issues/1694
  */
 function parseKeywords(input: string): Dayjs | undefined {
   switch (input.trim().toLowerCase()) {
@@ -52,9 +58,11 @@ function parseWithSpec(
     ...canonicalFormats,
   ];
 
+  // Try strict parsing first
   const strictResult = dayjs(input, allFormats, true);
   if (strictResult.isValid()) return strictResult;
 
+  // Try canonical fallback (non-strict)
   const canonicalResult = dayjs(input, canonicalFormats);
   if (canonicalResult.isValid()) return canonicalResult;
 
@@ -72,34 +80,54 @@ export default class DateTimeFormatter implements InputFormatter<string> {
    * @param input could come from the user or from an API response
    */
   parse(input: string): ParseResult<string> {
+    const trimmed = input.trim();
+
+    // ⚠️ CRITICAL: Do NOT parse canonical PostgreSQL dates with dayjs.
+    // It cannot handle:
+    // - 0001-12-31
+    // - 0200-12-31
+    // - 20010-12-31
+    // - 2001-12-31 BC
+    // So we preserve them exactly.
+    if (PG_CANONICAL_DATE_REGEX.test(trimmed)) {
+      return { value: trimmed, intermediateDisplay: input };
+    }
+
     const dayjsValue =
-      parseKeywords(input) ?? parseWithSpec(input, this.specification);
+      parseKeywords(trimmed) ?? parseWithSpec(trimmed, this.specification);
 
     const value = (() => {
       if (dayjsValue) {
-        // If we were able to parse the input, then we return the canonical
-        // string representation of the date/time.
+        // Convert to canonical spec-defined string
         return this.specification.getCanonicalString(dayjsValue.toDate());
       }
 
-      // If we were _not_ able to parse the input, then we fall back to
-      // returning the input as is. This behavior is necessary because
-      // PostgreSQL can parse many different formats that we can't (yet?) parse
-      // on the front end.
-      return input;
+      // If parsing failed, keep the original input as PostgreSQL may accept it.
+      return trimmed;
     })();
 
-    // Do not do any formatting as the user types
+    // Do not modify what the user sees while typing
     const intermediateDisplay = input;
 
-    return { value: value.trim() ? value : null, intermediateDisplay };
+    return { value: value ? value : null, intermediateDisplay };
   }
 
+  /**
+   * Convert canonical date string → User-facing display format
+   */
   format(canonicalDateStringOrUserInput: string): string {
+    const trimmed = canonicalDateStringOrUserInput.trim();
+
+    // Preserve canonical PostgreSQL dates exactly.
+    if (PG_CANONICAL_DATE_REGEX.test(trimmed)) {
+      return trimmed;
+    }
+
     const value = dayjs(
-      canonicalDateStringOrUserInput,
+      trimmed,
       this.specification.getCanonicalFormattingStrings(),
     );
+
     if (value.isValid()) {
       return value.format(this.specification.getFormattingString());
     }
@@ -107,6 +135,9 @@ export default class DateTimeFormatter implements InputFormatter<string> {
     return canonicalDateStringOrUserInput;
   }
 
+  /**
+   * Parse a string and immediately format it.
+   */
   parseAndFormat(anyString: string): string {
     const { value } = this.parse(anyString);
     if (isDefinedNonNullable(value)) {
